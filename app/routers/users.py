@@ -169,6 +169,32 @@ async def get_employees(
         ]
     }
 
+@router.get("/dashboard-stats")
+async def dashboard_stats(
+    current_user=Depends(require_role("ADMIN"))
+):
+    total_employees = await db.user.count(
+        where={
+            "role": "EMPLOYEE"
+        }
+    )
+    total_tasks = await db.task.count()
+
+    pending_tasks = await db.task.count(
+        where={
+            "status": "PENDING"
+        }
+    )
+
+    return {
+        "status": True,
+        "data": {
+            "totalEmployees": total_employees,
+            "totalTasks": total_tasks,
+            "pendingTasks": pending_tasks
+        }
+    }
+
 @router.get("/{user_id}")
 async def get_employee(
     user_id: str,
