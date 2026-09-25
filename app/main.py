@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from app.database import db
 from app.routers.users import router as users_router
 from fastapi.middleware.cors import CORSMiddleware
+from app.routers.tasks import router as tasks_router
 
 app = FastAPI(
     title="Employee Task Management API",
@@ -25,6 +26,7 @@ async def shutdown():
     await db.disconnect()
 
 app.include_router(users_router)
+app.include_router(tasks_router)
 
 @app.get("/")
 async def root():
