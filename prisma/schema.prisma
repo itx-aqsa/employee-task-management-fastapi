@@ -7,32 +7,64 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(uuid())
-  name      String
-  email     String   @unique
-  password  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  role      Role     @default(EMPLOYEE)
-  tasks     Task[]
-}
-
 enum Role {
+  SUPER_ADMIN
   ADMIN
   EMPLOYEE
 }
 
-model Task {
-  id          String   @id @default(uuid())
-  title       String
+model Agency {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
   description String?
-  priority    Priority @default(MEDIUM)
-  status      Status   @default(PENDING)
-  userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isDefault   Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  memberships AgencyMembership[]
+  tasks       Task[]
+}
+
+model AgencyMembership {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  agencyId  String   @db.Uuid
+  role      Role
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agencyId])
+}
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  email     String   @unique
+  password  String
+  role      Role     @default(EMPLOYEE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks       Task[]
+  memberships AgencyMembership[]
+}
+
+model Task {
+  id          String    @id @default(uuid()) @db.Uuid
+  title       String
+  description String?
+  priority    Priority  @default(MEDIUM)
+  status      Status    @default(PENDING)
+  userId      String    @db.Uuid
+  agencyId    String?   @db.Uuid
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agency Agency? @relation(fields: [agencyId], references: [id], onDelete: Cascade)
 }
 
 enum Priority {
