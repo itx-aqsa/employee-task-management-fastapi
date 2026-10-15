@@ -1,18 +1,6 @@
 """
-Tests for the authentication and authorization foundation.
-
-Scope: security.py · auth.py · role.py
-
-No live database or running server required — all DB calls are mocked.
-
-Test groups
------------
-A. JWT creation and decoding (security.py)
-B. get_current_user — authentication (auth.py)
-C. require_platform_role (role.py)
-D. require_agency_role (role.py)
-E. require_role backward-compat shim (role.py)
-F. _validate_uuid helper (role.py)
+Auth layer tests — security.py, auth.py, role.py.
+All DB calls are mocked; no live server or database needed.
 """
 
 import pytest
@@ -50,7 +38,7 @@ from tests.conftest import (
 
 
 # ===========================================================================
-# A. JWT creation and decoding
+# A. JWT — security.py
 # ===========================================================================
 
 class TestJWT:
@@ -83,8 +71,7 @@ class TestJWT:
         token = make_legacy_token(ADMIN_ID, "ADMIN")
         payload = decode_access_token(token)
         assert payload["sub"] == ADMIN_ID
-        # role claim IS present in the payload — middleware just won't use it
-        assert "role" in payload
+        assert "role" in payload  # present in payload but never read by middleware
 
     def test_password_hash_and_verify(self):
         hashed = hash_password("secret123")
@@ -93,18 +80,11 @@ class TestJWT:
 
 
 # ===========================================================================
-# B. get_current_user — authentication
+# B. get_current_user — auth.py
 # ===========================================================================
 
 def _make_request(token: str | None) -> Request:
-    """Build a minimal Starlette Request with the given cookie value."""
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/",
-        "query_string": b"",
-        "headers": [],
-    }
+    scope = {"type": "http", "method": "GET", "path": "/", "query_string": b"", "headers": []}
     req = Request(scope)
     req._cookies = {"token": token} if token else {}
     return req
@@ -155,20 +135,16 @@ class TestGetCurrentUser:
         assert exc_info.value.status_code == 401
 
     async def test_legacy_token_role_is_ignored(self):
-        """
-        A legacy token claims role=ADMIN but the DB says EMPLOYEE.
-        The middleware must return EMPLOYEE (from DB), not ADMIN (from token).
-        """
+        """Token claims ADMIN but DB says EMPLOYEE — DB must win."""
         token = make_legacy_token(ADMIN_ID, "ADMIN")
         req = _make_request(token)
-        # DB says this user is now an EMPLOYEE
         user_obj = fake_user(ADMIN_ID, "EMPLOYEE")
 
         with patch("app.middleware.auth.db") as mock_db:
             mock_db.user.find_unique = AsyncMock(return_value=user_obj)
             result = await get_current_user(req)
 
-        assert result.platform_role == "EMPLOYEE"  # DB wins, not the token
+        assert result.platform_role == "EMPLOYEE"
 
     async def test_super_admin_role_loaded_from_db(self):
         token = make_token(SUPER_ADMIN_ID)
@@ -183,64 +159,52 @@ class TestGetCurrentUser:
 
 
 # ===========================================================================
-# C. require_platform_role
+# C. require_platform_role — role.py
 # ===========================================================================
 
 class TestRequirePlatformRole:
     async def test_super_admin_passes_super_admin_guard(self):
         ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
-        guard_fn = require_platform_role("SUPER_ADMIN")
-        result = await guard_fn(current_user=ctx)
+        result = await require_platform_role("SUPER_ADMIN")(current_user=ctx)
         assert result.platform_role == "SUPER_ADMIN"
 
     async def test_admin_blocked_from_super_admin_endpoint(self):
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
-        guard_fn = require_platform_role("SUPER_ADMIN")
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(current_user=ctx)
+            await require_platform_role("SUPER_ADMIN")(current_user=ctx)
         assert exc_info.value.status_code == 403
 
     async def test_employee_blocked_from_super_admin_endpoint(self):
         ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
-        guard_fn = require_platform_role("SUPER_ADMIN")
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(current_user=ctx)
+            await require_platform_role("SUPER_ADMIN")(current_user=ctx)
         assert exc_info.value.status_code == 403
 
     async def test_multi_role_any_match_passes(self):
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
-        guard_fn = require_platform_role("ADMIN", "SUPER_ADMIN")
-        result = await guard_fn(current_user=ctx)
+        result = await require_platform_role("ADMIN", "SUPER_ADMIN")(current_user=ctx)
         assert result.platform_role == "ADMIN"
 
     async def test_super_admin_not_implicitly_granted_to_non_listed_guards(self):
-        """
-        SUPER_ADMIN must be explicitly listed to gain access.
-        A guard that lists only "EMPLOYEE" must reject SUPER_ADMIN.
-        """
+        """SUPER_ADMIN must be explicitly listed — no implicit escalation."""
         ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
-        guard_fn = require_platform_role("EMPLOYEE")
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(current_user=ctx)
+            await require_platform_role("EMPLOYEE")(current_user=ctx)
         assert exc_info.value.status_code == 403
 
 
 # ===========================================================================
-# D. require_agency_role
+# D. require_agency_role — role.py
 # ===========================================================================
 
 class TestRequireAgencyRole:
     async def test_valid_membership_returns_agency_context(self):
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
         membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
-        guard_fn = require_agency_role("ADMIN")
 
         with patch("app.middleware.role.db") as mock_db:
             mock_db.agencymembership.find_unique = AsyncMock(return_value=membership)
-            result = await guard_fn(
-                x_agency_id=AGENCY_ID,
-                current_user=ctx
-            )
+            result = await require_agency_role("ADMIN")(x_agency_id=AGENCY_ID, current_user=ctx)
 
         assert isinstance(result, AgencyContext)
         assert result.agency_id == AGENCY_ID
@@ -249,26 +213,23 @@ class TestRequireAgencyRole:
 
     async def test_missing_agency_header_raises_400(self):
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
-        guard_fn = require_agency_role("ADMIN")
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(x_agency_id=None, current_user=ctx)
+            await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
         assert exc_info.value.status_code == 400
 
     async def test_invalid_uuid_agency_header_raises_400(self):
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
-        guard_fn = require_agency_role("ADMIN")
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(x_agency_id="not-a-uuid", current_user=ctx)
+            await require_agency_role("ADMIN")(x_agency_id="not-a-uuid", current_user=ctx)
         assert exc_info.value.status_code == 400
 
     async def test_no_membership_raises_403(self):
         ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
-        guard_fn = require_agency_role("ADMIN")
 
         with patch("app.middleware.role.db") as mock_db:
             mock_db.agencymembership.find_unique = AsyncMock(return_value=None)
             with pytest.raises(HTTPException) as exc_info:
-                await guard_fn(x_agency_id=AGENCY_ID, current_user=ctx)
+                await require_agency_role("ADMIN")(x_agency_id=AGENCY_ID, current_user=ctx)
 
         assert exc_info.value.status_code == 403
         assert "not a member" in exc_info.value.detail
@@ -277,106 +238,92 @@ class TestRequireAgencyRole:
         """User is EMPLOYEE in the agency but endpoint requires ADMIN."""
         ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
         membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
-        guard_fn = require_agency_role("ADMIN")
 
         with patch("app.middleware.role.db") as mock_db:
             mock_db.agencymembership.find_unique = AsyncMock(return_value=membership)
             with pytest.raises(HTTPException) as exc_info:
-                await guard_fn(x_agency_id=AGENCY_ID, current_user=ctx)
+                await require_agency_role("ADMIN")(x_agency_id=AGENCY_ID, current_user=ctx)
 
         assert exc_info.value.status_code == 403
 
     async def test_super_admin_bypasses_membership_check(self):
         """SUPER_ADMIN must pass without any AgencyMembership row."""
         ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
-        guard_fn = require_agency_role("ADMIN")
 
         with patch("app.middleware.role.db") as mock_db:
             mock_db.agencymembership.find_unique = AsyncMock(return_value=None)
-            result = await guard_fn(x_agency_id=AGENCY_ID, current_user=ctx)
+            result = await require_agency_role("ADMIN")(x_agency_id=AGENCY_ID, current_user=ctx)
 
-        # DB must NOT have been called for the SUPER_ADMIN path
         mock_db.agencymembership.find_unique.assert_not_called()
         assert result.agency_role == "SUPER_ADMIN"
         assert result.agency_id == AGENCY_ID
 
     async def test_super_admin_without_agency_header_raises_400(self):
-        """SUPER_ADMIN still needs to specify which agency they are acting on."""
+        """SUPER_ADMIN still needs to supply X-Agency-ID for agency-scoped endpoints."""
         ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
-        guard_fn = require_agency_role("ADMIN")
-
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(x_agency_id=None, current_user=ctx)
-
+            await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
         assert exc_info.value.status_code == 400
 
     async def test_cross_agency_access_denied(self):
-        """User is ADMIN in AGENCY_ID but tries to access OTHER_AGENCY."""
+        """User is ADMIN in AGENCY_ID but requests access to OTHER_AGENCY."""
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
-        guard_fn = require_agency_role("ADMIN")
 
         with patch("app.middleware.role.db") as mock_db:
-            # find_unique returns None → not a member of OTHER_AGENCY
             mock_db.agencymembership.find_unique = AsyncMock(return_value=None)
             with pytest.raises(HTTPException) as exc_info:
-                await guard_fn(x_agency_id=OTHER_AGENCY, current_user=ctx)
+                await require_agency_role("ADMIN")(x_agency_id=OTHER_AGENCY, current_user=ctx)
 
         assert exc_info.value.status_code == 403
 
     async def test_employee_role_accepted_for_employee_endpoint(self):
         ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
         membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
-        guard_fn = require_agency_role("EMPLOYEE")
 
         with patch("app.middleware.role.db") as mock_db:
             mock_db.agencymembership.find_unique = AsyncMock(return_value=membership)
-            result = await guard_fn(x_agency_id=AGENCY_ID, current_user=ctx)
+            result = await require_agency_role("EMPLOYEE")(x_agency_id=AGENCY_ID, current_user=ctx)
 
         assert result.agency_role == "EMPLOYEE"
 
 
 # ===========================================================================
-# E. require_role backward-compat shim
+# E. require_role shim — role.py
 # ===========================================================================
 
 class TestRequireRoleShim:
     async def test_admin_passes_admin_guard(self):
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
-        guard_fn = require_role("ADMIN")
-        result = await guard_fn(current_user=ctx)
+        result = await require_role("ADMIN")(current_user=ctx)
         assert result.platform_role == "ADMIN"
 
     async def test_super_admin_passes_admin_guard(self):
         """SUPER_ADMIN must be allowed through require_role('ADMIN')."""
         ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
-        guard_fn = require_role("ADMIN")
-        result = await guard_fn(current_user=ctx)
+        result = await require_role("ADMIN")(current_user=ctx)
         assert result.platform_role == "SUPER_ADMIN"
 
     async def test_employee_blocked_from_admin_guard(self):
         ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
-        guard_fn = require_role("ADMIN")
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(current_user=ctx)
+            await require_role("ADMIN")(current_user=ctx)
         assert exc_info.value.status_code == 403
 
     async def test_employee_passes_employee_guard(self):
         ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
-        guard_fn = require_role("EMPLOYEE")
-        result = await guard_fn(current_user=ctx)
+        result = await require_role("EMPLOYEE")(current_user=ctx)
         assert result.platform_role == "EMPLOYEE"
 
     async def test_admin_blocked_from_employee_guard(self):
-        """An ADMIN must not silently pass an employee-only guard."""
+        """ADMIN must not silently pass an employee-only guard."""
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
-        guard_fn = require_role("EMPLOYEE")
         with pytest.raises(HTTPException) as exc_info:
-            await guard_fn(current_user=ctx)
+            await require_role("EMPLOYEE")(current_user=ctx)
         assert exc_info.value.status_code == 403
 
 
 # ===========================================================================
-# F. _validate_uuid helper
+# F. _validate_uuid — role.py
 # ===========================================================================
 
 class TestValidateUUID:
