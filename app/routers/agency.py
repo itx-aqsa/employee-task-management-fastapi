@@ -155,19 +155,10 @@ async def deactivate_agency(
     agency_id: str,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
-    existing_agency = await db.agency.find_unique(where={"id": agency_id})
-    if not existing_agency:
-        raise HTTPException(status_code=404, detail="Agency not found")
-
-    deactivated_agency = await db.agency.update(
-        where={"id": agency_id},
-        data={"isActive": False},
+    raise HTTPException(
+        status_code=501,
+        detail="Agency deactivation is unavailable because the schema has no active-status field",
     )
-    return {
-        "status": True,
-        "message": "Agency deactivated successfully",
-        "data": deactivated_agency,
-    }
 
 
 @router.post("/{agency_id}/admins")
@@ -200,7 +191,7 @@ async def assign_admin_to_agency(
             detail="User not found"
         )
 
-    if user.role not in {"EMPLOYEE", "AGENCY_ADMIN"}:
+    if user.role not in {"EMPLOYEE", "ADMIN"}:
         raise HTTPException(
             status_code=400,
             detail="Only employee accounts can be assigned as an agency admin"
@@ -225,7 +216,7 @@ async def assign_admin_to_agency(
         data={
             "userId": payload.userId,
             "agencyId": agency_id,
-            "role": "AGENCY_ADMIN"
+            "role": "ADMIN"
         }
     )
 
