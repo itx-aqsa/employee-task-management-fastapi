@@ -1,33 +1,16 @@
-"""
-Shared context objects carried through the auth middleware stack.
-
-UserContext   – produced by get_current_user after JWT + DB lookup.
-AgencyContext – produced by require_agency_role after membership check.
-
-Using dataclasses (not plain dicts) gives us type-safety and makes
-it easy to add fields later without hunting down every dict key.
-"""
 from dataclasses import dataclass
 
 
 @dataclass
 class UserContext:
-    """
-    Who is the caller?
-    Populated from the JWT cookie (identity) and a live DB look-up
-    (platform_role).  Never trusts a role value embedded in the token.
-    """
-    id: str           # UUID string, matches User.id in the database
-    platform_role: str  # "SUPER_ADMIN" | "ADMIN" | "EMPLOYEE"  — from DB
+    """Authenticated caller. Platform role is always loaded from the DB, never from the token."""
+    id: str            # User.id (UUID)
+    platform_role: str  # "SUPER_ADMIN" | "ADMIN" | "EMPLOYEE"
 
 
 @dataclass
 class AgencyContext:
-    """
-    Which agency is the caller acting on behalf of, and what is their
-    role inside that agency?
-    Populated only when require_agency_role() is used.
-    """
+    """Caller acting within a specific agency. Produced by require_agency_role()."""
     user: UserContext
     agency_id: str    # validated UUID from X-Agency-ID header
-    agency_role: str  # "ADMIN" | "EMPLOYEE"  — from AgencyMembership in DB
+    agency_role: str  # role from AgencyMembership, or "SUPER_ADMIN" for platform admins
