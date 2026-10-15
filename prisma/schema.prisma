@@ -7,42 +7,22 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  name             String
-  email            String             @unique
-  password         String
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
-  role             Role               @default(EMPLOYEE)
-  id               String             @id @default(uuid()) @db.Uuid
-  AgencyMembership AgencyMembership[]
-  tasks            Task[]
-}
-
-model Task {
-  title       String
-  description String?
-  priority    Priority @default(MEDIUM)
-  status      Status   @default(PENDING)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  id          String   @id @default(uuid()) @db.Uuid
-  userId      String   @db.Uuid
-  agencyId    String?  @db.Uuid
-  Agency      Agency?  @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  EMPLOYEE
 }
 
 model Agency {
-  id               String             @id @default(uuid()) @db.Uuid
-  name             String
-  description      String?
-  isDefault        Boolean            @default(false)
-  isActive         Boolean            @default(true)
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
-  AgencyMembership AgencyMembership[]
-  Task             Task[]
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  memberships AgencyMembership[]
+  tasks       Task[]
 }
 
 model AgencyMembership {
@@ -52,16 +32,39 @@ model AgencyMembership {
   role      Role
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  Agency    Agency   @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  User      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
 
   @@unique([userId, agencyId])
 }
 
-enum Role {
-  AGENCY_ADMIN
-  EMPLOYEE
-  SUPER_ADMIN
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  email     String   @unique
+  password  String
+  role      Role     @default(EMPLOYEE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks       Task[]
+  memberships AgencyMembership[]
+}
+
+model Task {
+  id          String    @id @default(uuid()) @db.Uuid
+  title       String
+  description String?
+  priority    Priority  @default(MEDIUM)
+  status      Status    @default(PENDING)
+  userId      String    @db.Uuid
+  agencyId    String?   @db.Uuid
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agency Agency? @relation(fields: [agencyId], references: [id], onDelete: Cascade)
 }
 
 enum Priority {
