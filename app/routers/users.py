@@ -71,10 +71,7 @@ async def login_user(
             detail="Invalid email or password"
         )
 
-    token = create_access_token(
-        str(existing_user.id),
-        existing_user.role
-    )
+    token = create_access_token(str(existing_user.id))
 
     response.set_cookie(
         key="token",
