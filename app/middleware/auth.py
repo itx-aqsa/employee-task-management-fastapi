@@ -1,37 +1,28 @@
 from fastapi import Request, HTTPException
-from jose import jwt, JWTError
-from app.core.config import JWT_SECRET
-from app.core.security import ALGORITHM
+from jose import JWTError
 
-async def get_current_user(request: Request):
+from app.core.security import decode_access_token
+from app.database import db
+from app.schemas.auth import UserContext
+
+
+async def get_current_user(request: Request) -> UserContext:
     token = request.cookies.get("token")
     if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required"
-        )
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     try:
-        payload = jwt.decode(
-            token, 
-            JWT_SECRET,
-            algorithms=[ALGORITHM]
-        )
-        user_id = payload.get("sub")
-        role = payload.get("role")
-
-        if not user_id:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid token"
-            )
-
-        return {
-            "id": user_id,
-            "role": role
-        }
-
+        payload = decode_access_token(token)
     except JWTError:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired token"
-        )
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user_id: str | None = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token: missing subject")
+
+    # Load the role from the DB — never trust any role claim in the token.
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user:
+        raise HTTPException(status_code=401, detail="User account not found")
+
+    return UserContext(id=user_id, platform_role=str(user.role))
