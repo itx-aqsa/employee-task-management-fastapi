@@ -2,8 +2,10 @@ from fastapi import Request, HTTPException
 from jose import jwt, JWTError
 from app.core.config import JWT_SECRET
 from app.core.security import ALGORITHM
+from app.schemas.auth import UserContext
 
-async def get_current_user(request: Request):
+
+async def get_current_user(request: Request) -> UserContext:
     token = request.cookies.get("token")
     if not token:
         raise HTTPException(
@@ -12,7 +14,7 @@ async def get_current_user(request: Request):
         )
     try:
         payload = jwt.decode(
-            token, 
+            token,
             JWT_SECRET,
             algorithms=[ALGORITHM]
         )
@@ -25,10 +27,7 @@ async def get_current_user(request: Request):
                 detail="Invalid token"
             )
 
-        return {
-            "id": user_id,
-            "role": role
-        }
+        return UserContext(id=user_id, role=role)
 
     except JWTError:
         raise HTTPException(

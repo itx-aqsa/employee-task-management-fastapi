@@ -1,9 +1,10 @@
 from fastapi import Depends, HTTPException
 from app.database import db
 from app.middleware.auth import get_current_user
+from app.schemas.auth import UserContext
 
 
-async def get_agency_admin(current_user=Depends(get_current_user)):
+async def get_agency_admin(current_user: UserContext = Depends(get_current_user)):
     """Resolve the agency that the logged-in user is an ADMIN of.
 
     Agency-level roles live in AgencyMembership.role:
@@ -12,7 +13,7 @@ async def get_agency_admin(current_user=Depends(get_current_user)):
     """
     membership = await db.agencymembership.find_first(
         where={
-            "userId": current_user["id"],
+            "userId": current_user.id,
             "role": "ADMIN"
         }
     )
@@ -24,18 +25,18 @@ async def get_agency_admin(current_user=Depends(get_current_user)):
         )
 
     return {
-        "id": current_user["id"],
-        "role": current_user["role"],
+        "id": current_user.id,
+        "role": current_user.role,
         "agencyId": membership.agencyId,
         "membershipRole": membership.role
     }
 
 
-async def get_agency_member(current_user=Depends(get_current_user)):
+async def get_agency_member(current_user: UserContext = Depends(get_current_user)):
     """Resolve the agency the logged-in user belongs to (admin or employee)."""
     membership = await db.agencymembership.find_first(
         where={
-            "userId": current_user["id"]
+            "userId": current_user.id
         }
     )
 
@@ -46,8 +47,8 @@ async def get_agency_member(current_user=Depends(get_current_user)):
         )
 
     return {
-        "id": current_user["id"],
-        "role": current_user["role"],
+        "id": current_user.id,
+        "role": current_user.role,
         "agencyId": membership.agencyId,
         "membershipRole": membership.role
     }
