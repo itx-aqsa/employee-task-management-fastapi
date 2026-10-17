@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException
 from app.database import db
 from app.schemas.agency import (
@@ -70,12 +72,12 @@ async def get_agencies(
 
 @router.get("/{agency_id}")
 async def get_agency(
-    agency_id: str,
+    agency_id: UUID,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
     agency = await db.agency.find_unique(
         where={
-            "id": agency_id
+            "id": str(agency_id)
         }
     )
 
@@ -93,13 +95,13 @@ async def get_agency(
 
 @router.put("/{agency_id}")
 async def update_agency(
-    agency_id: str,
+    agency_id: UUID,
     agency_data: AgencyUpdate,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
     existing_agency = await db.agency.find_first(
         where={
-            "id": agency_id
+            "id": str(agency_id)
         }
     )
 
@@ -127,7 +129,7 @@ async def update_agency(
 
         update_data["name"] = agency_data.name
 
-    if agency_data.description is not None:
+    if "description" in agency_data.model_fields_set:
         update_data["description"] = agency_data.description
 
     if agency_data.isDefault is not None:
@@ -138,7 +140,7 @@ async def update_agency(
 
     updated_agency = await db.agency.update(
         where={
-            "id": agency_id
+            "id": str(agency_id)
         },
         data=update_data
     )
@@ -152,7 +154,7 @@ async def update_agency(
 
 @router.delete("/{agency_id}")
 async def deactivate_agency(
-    agency_id: str,
+    agency_id: UUID,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
     raise HTTPException(
@@ -163,13 +165,13 @@ async def deactivate_agency(
 
 @router.post("/{agency_id}/admins")
 async def assign_admin_to_agency(
-    agency_id: str,
+    agency_id: UUID,
     payload: AgencyAssignAdmin,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
     agency = await db.agency.find_unique(
         where={
-            "id": agency_id
+            "id": str(agency_id)
         }
     )
 
@@ -181,7 +183,7 @@ async def assign_admin_to_agency(
 
     user = await db.user.find_unique(
         where={
-            "id": payload.userId
+            "id": str(payload.userId)
         }
     )
 
@@ -200,8 +202,8 @@ async def assign_admin_to_agency(
     existing_membership = await db.agencymembership.find_unique(
         where={
             "userId_agencyId": {
-                "userId": payload.userId,
-                "agencyId": agency_id
+                "userId": str(payload.userId),
+                "agencyId": str(agency_id)
             }
         }
     )
@@ -214,8 +216,8 @@ async def assign_admin_to_agency(
 
     membership = await db.agencymembership.create(
         data={
-            "userId": payload.userId,
-            "agencyId": agency_id,
+            "userId": str(payload.userId),
+            "agencyId": str(agency_id),
             "role": "ADMIN"
         }
     )

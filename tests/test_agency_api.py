@@ -10,17 +10,22 @@ from app.routers.agency import (
     deactivate_agency,
     get_agencies,
     get_agency,
+    assign_admin_to_agency,
     update_agency,
 )
-from app.schemas.agency import AgencyCreate, AgencyUpdate
+from app.schemas.agency import AgencyAssignAdmin, AgencyCreate, AgencyUpdate
 
 
 class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.original_agency = db.agency
+        self.original_user = db.user
+        self.original_membership = db.agencymembership
 
     def tearDown(self):
         db.agency = self.original_agency
+        db.user = self.original_user
+        db.agencymembership = self.original_membership
 
     async def test_create_agency_saves_validated_values(self):
         created = {}
@@ -116,6 +121,24 @@ class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update_call, {"name": "East Office"})
         self.assertEqual(result["data"].name, "East Office")
 
+    async def test_update_can_clear_description(self):
+        update_call = {}
+
+        async def find_first(*, where):
+            return SimpleNamespace(id="agency-a", name="North Office")
+
+        async def update(*, where, data):
+            update_call.update(data)
+            return SimpleNamespace(id=where["id"], name="North Office", **data)
+
+        db.agency = SimpleNamespace(find_first=find_first, update=update)
+        await update_agency(
+            "agency-a", AgencyUpdate(description=None),
+            {"id": "root", "role": "SUPER_ADMIN"},
+        )
+
+        self.assertEqual(update_call, {"description": None})
+
     async def test_update_rejects_empty_body(self):
         async def find_first(*, where):
             return SimpleNamespace(id="agency-a", name="North Office")
@@ -128,23 +151,46 @@ class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(error.exception.status_code, 400)
 
-    async def test_deactivate_sets_is_active_false(self):
-        update_call = {}
+    async def test_deactivate_reports_unsupported_schema_operation(self):
+        with self.assertRaises(HTTPException) as error:
+            await deactivate_agency("agency-a", {"id": "root", "role": "SUPER_ADMIN"})
 
-        async def find_unique(*, where):
+        self.assertEqual(error.exception.status_code, 501)
+
+    async def test_admin_assignment_uses_role_defined_by_schema(self):
+        create_call = {}
+        user_id = "11111111-1111-4111-8111-111111111111"
+
+        async def find_agency(*, where):
             return SimpleNamespace(id=where["id"])
 
-        async def update(*, where, data):
-            update_call.update(data)
-            return SimpleNamespace(id=where["id"], isActive=data["isActive"])
+        async def find_user(*, where):
+            return SimpleNamespace(id=where["id"], role="EMPLOYEE")
 
-        db.agency = SimpleNamespace(find_unique=find_unique, update=update)
-        result = await deactivate_agency(
-            "agency-a", {"id": "root", "role": "SUPER_ADMIN"}
+        async def find_membership(*, where):
+            return None
+
+        async def create_membership(*, data):
+            create_call.update(data)
+            return SimpleNamespace(**data)
+
+        db.agency = SimpleNamespace(find_unique=find_agency)
+        db.user = SimpleNamespace(find_unique=find_user)
+        db.agencymembership = SimpleNamespace(
+            find_unique=find_membership, create=create_membership
         )
 
-        self.assertEqual(update_call, {"isActive": False})
-        self.assertFalse(result["data"].isActive)
+        await assign_admin_to_agency(
+            "agency-a", AgencyAssignAdmin(userId=user_id),
+            {"id": "root", "role": "SUPER_ADMIN"},
+        )
+
+        self.assertEqual(create_call["userId"], user_id)
+        self.assertEqual(create_call["role"], "ADMIN")
+
+    async def test_admin_assignment_rejects_malformed_user_id(self):
+        with self.assertRaises(ValidationError):
+            AgencyAssignAdmin(userId="not-a-uuid")
 
 
 if __name__ == "__main__":

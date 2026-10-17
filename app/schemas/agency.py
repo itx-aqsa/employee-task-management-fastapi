@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 from pydantic import BaseModel, StringConstraints
 
 
@@ -18,4 +19,4 @@ class AgencyUpdate(BaseModel):
 
 
 class AgencyAssignAdmin(BaseModel):
-    userId: str
+    userId: UUID
