@@ -13,7 +13,14 @@ router = APIRouter(
 )
 
 
+# ---------------------------------------------------------------------------
+# Both "" and "/" are registered for every collection-level route so the
+# frontend can call either /agencies or /agencies/ without triggering a
+# 307 redirect that some HTTP clients handle incorrectly (body loss on POST).
+# ---------------------------------------------------------------------------
+
 @router.post("/")
+@router.post("")
 async def create_agency(
     agency: AgencyCreate,
     current_user=Depends(require_role("SUPER_ADMIN"))
@@ -53,6 +60,7 @@ async def create_agency(
 
 
 @router.get("/")
+@router.get("")
 async def get_agencies(
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
