@@ -8,10 +8,7 @@ from app.routers.agency import router as agency_router
 app = FastAPI(
     title="Employee Task Management API",
     version="1.0.0",
-    # Disable automatic trailing-slash redirects (307).
-    # Some HTTP clients (fetch, axios) drop the request body when following
-    # a 307 redirect from POST /agencies -> POST /agencies/, causing silent
-    # 404 / empty-body errors. We register both paths explicitly instead.
+    # Disable 307 redirects; both /agencies and /agencies/ are registered explicitly.
     redirect_slashes=False,
 )
 

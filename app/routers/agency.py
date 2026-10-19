@@ -13,11 +13,7 @@ router = APIRouter(
 )
 
 
-# ---------------------------------------------------------------------------
-# Both "" and "/" are registered for every collection-level route so the
-# frontend can call either /agencies or /agencies/ without triggering a
-# 307 redirect that some HTTP clients handle incorrectly (body loss on POST).
-# ---------------------------------------------------------------------------
+# Register both "" and "/" to accept /agencies and /agencies/ without a redirect.
 
 @router.post("/")
 @router.post("")
