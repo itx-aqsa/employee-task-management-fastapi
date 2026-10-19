@@ -110,7 +110,7 @@ async def get_profile(
 ):
     user = await db.user.find_unique(
         where={
-            "id": current_user["id"]
+            "id": current_user.id
         }
     )
 
