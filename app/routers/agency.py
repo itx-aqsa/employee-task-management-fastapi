@@ -117,7 +117,7 @@ async def update_agency(
 
     update_data = {}
 
-    if agency_data.name is not None:
+    if "name" in agency_data.model_fields_set and agency_data.name is not None:
         if agency_data.name != existing_agency.name:
             name_exists = await db.agency.find_first(
                 where={
@@ -136,7 +136,7 @@ async def update_agency(
     if "description" in agency_data.model_fields_set:
         update_data["description"] = agency_data.description
 
-    if agency_data.isDefault is not None:
+    if "isDefault" in agency_data.model_fields_set and agency_data.isDefault is not None:
         update_data["isDefault"] = agency_data.isDefault
 
     if not update_data:
