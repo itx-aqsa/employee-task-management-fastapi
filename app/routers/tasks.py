@@ -90,7 +90,7 @@ async def get_my_tasks(
 ):
     tasks = await db.task.find_many(
         where={
-            'userId': current_user['id']
+            'userId': current_user.id
         },
         order=[
             {
@@ -108,7 +108,7 @@ async def get_my_tasks(
 async def get_task_board(
     current_user=Depends(get_current_user)
 ):
-    if current_user['role'] == 'ADMIN':
+    if current_user.platform_role == 'ADMIN':
         tasks = await db.task.find_many(
             order=[
                 {
@@ -119,10 +119,10 @@ async def get_task_board(
                 'user': True
             }
         )
-    elif current_user['role'] == 'EMPLOYEE':
+    elif current_user.platform_role == 'EMPLOYEE':
         tasks = await db.task.find_many(
             where={
-                'userId': current_user['id']
+                'userId': current_user.id
             },
             order=[
                 {
@@ -311,8 +311,8 @@ async def update_task_status(
 
     # Employee can update only their own task
     if (
-        current_user['role'] == 'EMPLOYEE'
-        and str(task.userId) != str(current_user['id'])
+        current_user.platform_role == 'EMPLOYEE'
+        and str(task.userId) != str(current_user.id)
     ):
         raise HTTPException(
             status_code=403,
