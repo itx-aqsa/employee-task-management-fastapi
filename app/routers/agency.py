@@ -200,7 +200,7 @@ async def assign_admin_to_agency(
     if user.role not in {"EMPLOYEE", "ADMIN"}:
         raise HTTPException(
             status_code=400,
-            detail="Only employee accounts can be assigned as an agency admin"
+            detail="Only EMPLOYEE or ADMIN accounts can be assigned as an agency admin"
         )
 
     existing_membership = await db.agencymembership.find_unique(
