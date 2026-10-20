@@ -10,12 +10,14 @@ class AgencyCreate(BaseModel):
     name: AgencyName
     description: str | None = None
     isDefault: bool = False
+    isActive: bool = True
 
 
 class AgencyUpdate(BaseModel):
     name: AgencyName | None = None
     description: str | None = None
     isDefault: bool | None = None
+    isActive: bool | None = None
 
 
 class AgencyAssignAdmin(BaseModel):

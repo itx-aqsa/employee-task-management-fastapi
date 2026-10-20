@@ -37,7 +37,8 @@ async def create_agency(
         data={
             "name": agency.name,
             "description": agency.description,
-            "isDefault": agency.isDefault
+            "isDefault": agency.isDefault,
+            "isActive": agency.isActive,
         }
     )
 
@@ -49,9 +50,10 @@ async def create_agency(
             "name": new_agency.name,
             "description": new_agency.description,
             "isDefault": new_agency.isDefault,
+            "isActive": new_agency.isActive,
             "createdAt": new_agency.createdAt,
-            "updatedAt": new_agency.updatedAt
-        }
+            "updatedAt": new_agency.updatedAt,
+        },
     }
 
 
@@ -139,6 +141,9 @@ async def update_agency(
     if "isDefault" in agency_data.model_fields_set and agency_data.isDefault is not None:
         update_data["isDefault"] = agency_data.isDefault
 
+    if "isActive" in agency_data.model_fields_set and agency_data.isActive is not None:
+        update_data["isActive"] = agency_data.isActive
+
     if not update_data:
         raise HTTPException(status_code=400, detail="At least one agency field must be provided")
 
@@ -161,10 +166,19 @@ async def deactivate_agency(
     agency_id: UUID,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
-    raise HTTPException(
-        status_code=501,
-        detail="Agency deactivation is unavailable because the schema has no active-status field",
+    """Soft-delete: sets isActive=False rather than dropping the record."""
+    existing = await db.agency.find_unique(where={"id": str(agency_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agency not found")
+
+    if not existing.isActive:
+        raise HTTPException(status_code=400, detail="Agency is already inactive")
+
+    updated = await db.agency.update(
+        where={"id": str(agency_id)},
+        data={"isActive": False},
     )
+    return {"status": True, "message": "Agency deactivated successfully", "data": updated}
 
 
 @router.post("/{agency_id}/admins")

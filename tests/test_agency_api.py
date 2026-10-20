@@ -37,7 +37,8 @@ class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
             created.update(data)
             return SimpleNamespace(
                 id="agency-a", name=data["name"], description=data["description"],
-                isDefault=data["isDefault"], createdAt="now", updatedAt="now",
+                isDefault=data["isDefault"], isActive=data["isActive"],
+                createdAt="now", updatedAt="now",
             )
 
         db.agency = SimpleNamespace(find_first=find_first, create=create)
@@ -47,6 +48,7 @@ class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(created["name"], "North Office")
+        self.assertTrue(created["isActive"])
         self.assertTrue(result["status"])
 
     async def test_create_rejects_blank_agency_name(self):
@@ -151,11 +153,60 @@ class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(error.exception.status_code, 400)
 
-    async def test_deactivate_reports_unsupported_schema_operation(self):
+    async def test_update_can_set_is_active(self):
+        update_call = {}
+
+        async def find_first(*, where):
+            return SimpleNamespace(id="agency-a", name="North Office")
+
+        async def update(*, where, data):
+            update_call.update(data)
+            return SimpleNamespace(id=where["id"], name="North Office", **data)
+
+        db.agency = SimpleNamespace(find_first=find_first, update=update)
+        await update_agency(
+            "agency-a", AgencyUpdate(isActive=False),
+            {"id": "root", "role": "SUPER_ADMIN"},
+        )
+
+        self.assertFalse(update_call["isActive"])
+
+    async def test_deactivate_sets_is_active_false(self):
+        """DELETE should soft-delete by setting isActive=False."""
+        updated_data = {}
+
+        async def find_unique(*, where):
+            return SimpleNamespace(id=where["id"], isActive=True)
+
+        async def update(*, where, data):
+            updated_data.update(data)
+            return SimpleNamespace(id=where["id"], isActive=data["isActive"])
+
+        db.agency = SimpleNamespace(find_unique=find_unique, update=update)
+        result = await deactivate_agency("agency-a", {"id": "root", "role": "SUPER_ADMIN"})
+
+        self.assertFalse(updated_data["isActive"])
+        self.assertTrue(result["status"])
+
+    async def test_deactivate_returns_404_for_missing_agency(self):
+        async def find_unique(*, where):
+            return None
+
+        db.agency = SimpleNamespace(find_unique=find_unique)
+        with self.assertRaises(HTTPException) as error:
+            await deactivate_agency("missing", {"id": "root", "role": "SUPER_ADMIN"})
+
+        self.assertEqual(error.exception.status_code, 404)
+
+    async def test_deactivate_returns_400_when_already_inactive(self):
+        async def find_unique(*, where):
+            return SimpleNamespace(id=where["id"], isActive=False)
+
+        db.agency = SimpleNamespace(find_unique=find_unique)
         with self.assertRaises(HTTPException) as error:
             await deactivate_agency("agency-a", {"id": "root", "role": "SUPER_ADMIN"})
 
-        self.assertEqual(error.exception.status_code, 501)
+        self.assertEqual(error.exception.status_code, 400)
 
     async def test_admin_assignment_uses_role_defined_by_schema(self):
         create_call = {}
