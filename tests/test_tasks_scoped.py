@@ -8,6 +8,7 @@ Covers the cross-agency IDOR protection added in feature/user-task-scoping.
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.schemas.auth import UserContext, AgencyContext
 from app.routers.tasks import (
@@ -141,34 +142,14 @@ class TestCreateTask:
         assert exc_info.value.status_code == 400
 
     async def test_invalid_priority_raises_400(self):
-        ctx = _admin_ctx()
-        membership = _make_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
-        membership.user.role = "EMPLOYEE"
-
-        with patch("app.routers.tasks.db") as mock_db:
-            mock_db.agencymembership.find_unique = AsyncMock(return_value=membership)
-            with pytest.raises(HTTPException) as exc_info:
-                await create_task(
-                    task=TaskCreate(title="T", userId=EMPLOYEE_ID, priority="CRITICAL"),
-                    agency_ctx=ctx,
-                )
-
-        assert exc_info.value.status_code == 400
+        """Invalid priority is now rejected by Pydantic at schema level (ValidationError)."""
+        with pytest.raises(ValidationError):
+            TaskCreate(title="T", userId=EMPLOYEE_ID, priority="CRITICAL")
 
     async def test_invalid_status_raises_400(self):
-        ctx = _admin_ctx()
-        membership = _make_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
-        membership.user.role = "EMPLOYEE"
-
-        with patch("app.routers.tasks.db") as mock_db:
-            mock_db.agencymembership.find_unique = AsyncMock(return_value=membership)
-            with pytest.raises(HTTPException) as exc_info:
-                await create_task(
-                    task=TaskCreate(title="T", userId=EMPLOYEE_ID, status="DONE"),
-                    agency_ctx=ctx,
-                )
-
-        assert exc_info.value.status_code == 400
+        """Invalid status is now rejected by Pydantic at schema level (ValidationError)."""
+        with pytest.raises(ValidationError):
+            TaskCreate(title="T", userId=EMPLOYEE_ID, status="DONE")
 
 
 # ===========================================================================

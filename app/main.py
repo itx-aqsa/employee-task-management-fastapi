@@ -7,7 +7,9 @@ from app.routers.agency import router as agency_router
 
 app = FastAPI(
     title="Employee Task Management API",
-    version="1.0.0"
+    version="1.0.0",
+    # Disable 307 redirects; both /agencies and /agencies/ are registered explicitly.
+    redirect_slashes=False,
 )
 
 app.add_middleware(

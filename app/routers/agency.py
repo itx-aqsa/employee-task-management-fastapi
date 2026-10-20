@@ -13,7 +13,10 @@ router = APIRouter(
 )
 
 
+# Register both "" and "/" to accept /agencies and /agencies/ without a redirect.
+
 @router.post("/")
+@router.post("")
 async def create_agency(
     agency: AgencyCreate,
     current_user=Depends(require_role("SUPER_ADMIN"))
@@ -53,6 +56,7 @@ async def create_agency(
 
 
 @router.get("/")
+@router.get("")
 async def get_agencies(
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
@@ -113,7 +117,7 @@ async def update_agency(
 
     update_data = {}
 
-    if agency_data.name is not None:
+    if "name" in agency_data.model_fields_set and agency_data.name is not None:
         if agency_data.name != existing_agency.name:
             name_exists = await db.agency.find_first(
                 where={
@@ -132,7 +136,7 @@ async def update_agency(
     if "description" in agency_data.model_fields_set:
         update_data["description"] = agency_data.description
 
-    if agency_data.isDefault is not None:
+    if "isDefault" in agency_data.model_fields_set and agency_data.isDefault is not None:
         update_data["isDefault"] = agency_data.isDefault
 
     if not update_data:
@@ -196,7 +200,7 @@ async def assign_admin_to_agency(
     if user.role not in {"EMPLOYEE", "ADMIN"}:
         raise HTTPException(
             status_code=400,
-            detail="Only employee accounts can be assigned as an agency admin"
+            detail="Only EMPLOYEE or ADMIN accounts can be assigned as an agency admin"
         )
 
     existing_membership = await db.agencymembership.find_unique(
