@@ -13,7 +13,7 @@ from app.routers.agency import (
     assign_admin_to_agency,
     update_agency,
 )
-from app.schemas.agency import AgencyAssignAdmin, AgencyCreate, AgencyUpdate
+from app.schemas.agency import AgencyAdminCreate, AgencyCreate, AgencyUpdate
 
 
 class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
@@ -208,40 +208,102 @@ class AgencyApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(error.exception.status_code, 400)
 
-    async def test_admin_assignment_uses_role_defined_by_schema(self):
-        create_call = {}
-        user_id = "11111111-1111-4111-8111-111111111111"
+    async def test_admin_assignment_creates_user_and_membership(self):
+        """Happy path: new user is created with ADMIN role and linked to the agency."""
+        created_user = {}
+        created_membership = {}
+        new_user_id = "22222222-2222-4222-8222-222222222222"
 
         async def find_agency(*, where):
             return SimpleNamespace(id=where["id"])
 
-        async def find_user(*, where):
-            return SimpleNamespace(id=where["id"], role="EMPLOYEE")
+        async def find_user_by_email(*, where):
+            return None  # no duplicate — email is free
 
-        async def find_membership(*, where):
-            return None
+        async def create_user(*, data):
+            created_user.update(data)
+            return SimpleNamespace(
+                id=new_user_id,
+                name=data["name"],
+                email=data["email"],
+                role=data["role"],
+            )
 
         async def create_membership(*, data):
-            create_call.update(data)
-            return SimpleNamespace(**data)
+            created_membership.update(data)
+            return SimpleNamespace(
+                id="mem-1",
+                userId=data["userId"],
+                agencyId=data["agencyId"],
+                role=data["role"],
+            )
 
         db.agency = SimpleNamespace(find_unique=find_agency)
-        db.user = SimpleNamespace(find_unique=find_user)
-        db.agencymembership = SimpleNamespace(
-            find_unique=find_membership, create=create_membership
-        )
+        db.user = SimpleNamespace(find_unique=find_user_by_email, create=create_user)
+        db.agencymembership = SimpleNamespace(create=create_membership)
 
-        await assign_admin_to_agency(
-            "agency-a", AgencyAssignAdmin(userId=user_id),
+        result = await assign_admin_to_agency(
+            "agency-a",
+            AgencyAdminCreate(name="Alice", email="alice@example.com", password="secret123"),
             {"id": "root", "role": "SUPER_ADMIN"},
         )
 
-        self.assertEqual(create_call["userId"], user_id)
-        self.assertEqual(create_call["role"], "ADMIN")
+        # User was created with ADMIN platform role and hashed password
+        self.assertEqual(created_user["name"], "Alice")
+        self.assertEqual(created_user["email"], "alice@example.com")
+        self.assertEqual(created_user["role"], "ADMIN")
+        self.assertNotEqual(created_user["password"], "secret123")  # must be hashed
 
-    async def test_admin_assignment_rejects_malformed_user_id(self):
+        # Membership links the new user to the agency as ADMIN
+        self.assertEqual(created_membership["userId"], new_user_id)
+        self.assertEqual(created_membership["role"], "ADMIN")
+
+        self.assertTrue(result["status"])
+        self.assertEqual(result["data"]["user"]["id"], new_user_id)
+        self.assertEqual(result["data"]["membership"]["role"], "ADMIN")
+
+    async def test_admin_assignment_rejects_duplicate_email(self):
+        """400 when the provided email is already taken."""
+
+        async def find_agency(*, where):
+            return SimpleNamespace(id=where["id"])
+
+        async def find_user_by_email(*, where):
+            return SimpleNamespace(id="existing-user", email=where["email"])
+
+        db.agency = SimpleNamespace(find_unique=find_agency)
+        db.user = SimpleNamespace(find_unique=find_user_by_email)
+
+        with self.assertRaises(HTTPException) as error:
+            await assign_admin_to_agency(
+                "agency-a",
+                AgencyAdminCreate(name="Bob", email="taken@example.com", password="pw"),
+                {"id": "root", "role": "SUPER_ADMIN"},
+            )
+
+        self.assertEqual(error.exception.status_code, 400)
+
+    async def test_admin_assignment_rejects_missing_agency(self):
+        """404 when the agency does not exist."""
+
+        async def find_agency(*, where):
+            return None
+
+        db.agency = SimpleNamespace(find_unique=find_agency)
+
+        with self.assertRaises(HTTPException) as error:
+            await assign_admin_to_agency(
+                "agency-a",
+                AgencyAdminCreate(name="Carol", email="carol@example.com", password="pw"),
+                {"id": "root", "role": "SUPER_ADMIN"},
+            )
+
+        self.assertEqual(error.exception.status_code, 404)
+
+    async def test_admin_assignment_rejects_invalid_email(self):
+        """ValidationError when the email field is not a valid email address."""
         with self.assertRaises(ValidationError):
-            AgencyAssignAdmin(userId="not-a-uuid")
+            AgencyAdminCreate(name="Dave", email="not-an-email", password="pw")
 
 
 if __name__ == "__main__":

@@ -16,3 +16,10 @@ class UserUpdate(BaseModel):
     name: str | None = None
     email: EmailStr | None = None  # EmailStr so invalid formats are rejected on update too
     password: str | None = None
+
+
+class EmployeeCreate(BaseModel):
+    """Payload for an ADMIN creating a new EMPLOYEE within their agency."""
+    name: str
+    email: EmailStr
+    password: str

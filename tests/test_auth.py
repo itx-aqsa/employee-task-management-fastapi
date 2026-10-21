@@ -211,11 +211,25 @@ class TestRequireAgencyRole:
         assert result.agency_role == "ADMIN"
         assert result.user.id == ADMIN_ID
 
-    async def test_missing_agency_header_raises_400(self):
-        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+    async def test_missing_agency_header_raises_400_for_unknown_role(self):
+        """A role that is neither EMPLOYEE, ADMIN, nor SUPER_ADMIN gets 400 on missing header."""
+        # Construct a context with a role that falls through all auto-resolve branches.
+        ctx = UserContext(id=ADMIN_ID, platform_role="UNKNOWN_ROLE")
         with pytest.raises(HTTPException) as exc_info:
             await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
         assert exc_info.value.status_code == 400
+
+    async def test_admin_missing_header_resolves_from_db_not_400(self):
+        """ADMIN without header no longer gets 400 — it auto-resolves from the membership table."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            # Must succeed, not raise 400
+            result = await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        assert result.agency_id == AGENCY_ID
 
     async def test_invalid_uuid_agency_header_raises_400(self):
         ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
@@ -339,3 +353,191 @@ class TestValidateUUID:
         with pytest.raises(HTTPException) as exc_info:
             _validate_uuid("")
         assert exc_info.value.status_code == 400
+
+
+# ===========================================================================
+# G. require_agency_role — EMPLOYEE auto-resolve (no X-Agency-ID header)
+# ===========================================================================
+
+class TestRequireAgencyRoleEmployeeAutoResolve:
+    async def test_employee_without_header_resolves_agency_from_membership(self):
+        """EMPLOYEE omitting X-Agency-ID gets agency from their membership row."""
+        ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+        membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            result = await require_agency_role("EMPLOYEE")(x_agency_id=None, current_user=ctx)
+
+        assert isinstance(result, AgencyContext)
+        assert result.agency_id == AGENCY_ID
+        assert result.agency_role == "EMPLOYEE"
+        assert result.user.id == EMPLOYEE_ID
+
+    async def test_employee_without_header_uses_find_first_not_find_unique(self):
+        """The auto-resolve path must use find_first filtered by userId AND role=EMPLOYEE."""
+        ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+        membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            await require_agency_role("EMPLOYEE")(x_agency_id=None, current_user=ctx)
+
+        from prisma.enums import Role
+        mock_db.agencymembership.find_first.assert_awaited_once()
+        call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
+        assert call_kwargs["where"]["userId"] == EMPLOYEE_ID
+        assert call_kwargs["where"]["role"] == Role.EMPLOYEE
+        assert "order" in call_kwargs
+
+    async def test_employee_without_header_no_membership_raises_403(self):
+        """If auto-resolve finds no membership, the response must be 403, not 400."""
+        ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=None)
+            with pytest.raises(HTTPException) as exc_info:
+                await require_agency_role("EMPLOYEE")(x_agency_id=None, current_user=ctx)
+
+        assert exc_info.value.status_code == 403
+        assert "No agency membership found" in exc_info.value.detail
+
+    async def test_employee_without_header_wrong_role_raises_403(self):
+        """Auto-resolved membership role must still satisfy the endpoint's allowed_roles."""
+        ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+        # Membership exists but with EMPLOYEE role; endpoint requires ADMIN
+        membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            with pytest.raises(HTTPException) as exc_info:
+                await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        assert exc_info.value.status_code == 403
+
+    async def test_admin_without_header_auto_resolves_agency(self):
+        """ADMIN omitting X-Agency-ID now auto-resolves from their membership row."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            result = await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        assert isinstance(result, AgencyContext)
+        assert result.agency_id == AGENCY_ID
+        assert result.agency_role == "ADMIN"
+
+    async def test_employee_with_explicit_header_still_uses_find_unique(self):
+        """When an EMPLOYEE does supply X-Agency-ID, the normal path must be used."""
+        ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+        membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_unique = AsyncMock(return_value=membership)
+            result = await require_agency_role("EMPLOYEE")(
+                x_agency_id=AGENCY_ID, current_user=ctx
+            )
+
+        mock_db.agencymembership.find_unique.assert_awaited_once()
+        assert result.agency_id == AGENCY_ID
+
+
+# ===========================================================================
+# H. require_agency_role — ADMIN auto-resolve (no X-Agency-ID header)
+# ===========================================================================
+
+class TestRequireAgencyRoleAdminAutoResolve:
+    async def test_admin_without_header_resolves_agency_from_membership(self):
+        """ADMIN omitting X-Agency-ID gets agency resolved from their membership row."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            result = await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        assert isinstance(result, AgencyContext)
+        assert result.agency_id == AGENCY_ID
+        assert result.agency_role == "ADMIN"
+        assert result.user.id == ADMIN_ID
+
+    async def test_admin_without_header_uses_find_first_not_find_unique(self):
+        """The ADMIN auto-resolve path must use find_first filtered by userId AND role=ADMIN."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        from prisma.enums import Role
+        mock_db.agencymembership.find_first.assert_awaited_once()
+        call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
+        assert call_kwargs["where"]["userId"] == ADMIN_ID
+        assert call_kwargs["where"]["role"] == Role.ADMIN
+        assert "order" in call_kwargs
+
+    async def test_admin_without_header_no_membership_raises_403(self):
+        """If ADMIN auto-resolve finds no membership, reject with 403, not 400."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=None)
+            with pytest.raises(HTTPException) as exc_info:
+                await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        assert exc_info.value.status_code == 403
+        assert "No agency membership found" in exc_info.value.detail
+
+    async def test_admin_without_header_employee_membership_raises_403(self):
+        """ADMIN whose membership role is EMPLOYEE is rejected when endpoint needs ADMIN."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        membership = fake_membership(ADMIN_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=membership)
+            with pytest.raises(HTTPException) as exc_info:
+                await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        assert exc_info.value.status_code == 403
+
+    async def test_admin_with_explicit_header_uses_find_unique(self):
+        """When ADMIN supplies X-Agency-ID explicitly, the normal find_unique path runs."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_unique = AsyncMock(return_value=membership)
+            result = await require_agency_role("ADMIN")(
+                x_agency_id=AGENCY_ID, current_user=ctx
+            )
+
+        mock_db.agencymembership.find_unique.assert_awaited_once()
+        mock_db.agencymembership.find_first.assert_not_called()
+        assert result.agency_id == AGENCY_ID
+        assert result.agency_role == "ADMIN"
+
+    async def test_super_admin_still_requires_header_after_change(self):
+        """SUPER_ADMIN must not be affected by the ADMIN auto-resolve change."""
+        ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
+        with pytest.raises(HTTPException) as exc_info:
+            await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+        assert exc_info.value.status_code == 400
+
+    async def test_admin_role_filter_prevents_resolving_stale_employee_membership(self):
+        """find_first for ADMIN must filter role=ADMIN so a stale EMPLOYEE membership
+        in another agency is never returned and never causes wrong-agency data."""
+        ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        # DB returns None because find_first is filtered to role=ADMIN — no match.
+        with patch("app.middleware.role.db") as mock_db:
+            mock_db.agencymembership.find_first = AsyncMock(return_value=None)
+            with pytest.raises(HTTPException) as exc_info:
+                await require_agency_role("ADMIN")(x_agency_id=None, current_user=ctx)
+
+        # Must be 403 (no membership), not 400 (header missing), not 200 with wrong data.
+        assert exc_info.value.status_code == 403
+        # Confirm the role filter was actually sent to the DB.
+        from prisma.enums import Role
+        call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
+        assert call_kwargs["where"].get("role") == Role.ADMIN
