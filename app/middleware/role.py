@@ -1,6 +1,7 @@
 import uuid
 from fastapi import Depends, HTTPException, Header
 from typing import Optional
+from prisma.enums import Role
 
 from app.middleware.auth import get_current_user
 from app.database import db
@@ -29,6 +30,14 @@ def require_agency_role(*allowed_roles: str):
     Requires a valid X-Agency-ID header and verifies the user has a matching
     AgencyMembership row. SUPER_ADMIN bypasses the membership check but still
     needs the header so queries know which agency to act on.
+
+    Special case — EMPLOYEE or ADMIN without X-Agency-ID header:
+        If the platform role is EMPLOYEE or ADMIN and the header is absent (or
+        empty), the guard automatically resolves the agency by looking up the
+        user's most-recent AgencyMembership row. This lets both employee and
+        admin clients omit the header entirely when they belong to exactly one
+        agency; the agency context is derived from the DB instead.
+        If no membership is found the request is rejected with 403.
     """
     async def _check(
         x_agency_id: Optional[str] = Header(default=None, alias="X-Agency-ID"),
@@ -45,6 +54,34 @@ def require_agency_role(*allowed_roles: str):
             _validate_uuid(x_agency_id)
             return AgencyContext(user=current_user, agency_id=x_agency_id, agency_role="SUPER_ADMIN")
 
+        # EMPLOYEE or ADMIN without header: auto-resolve agency from the membership table.
+        # Filter by the user's platform role so we always get the right membership kind —
+        # an ADMIN who was previously an EMPLOYEE in another agency won't accidentally
+        # resolve to that EMPLOYEE membership and return stale/wrong agency data.
+        if not x_agency_id and current_user.platform_role in ("EMPLOYEE", "ADMIN"):
+            lookup_role = Role.ADMIN if current_user.platform_role == "ADMIN" else Role.EMPLOYEE
+            membership = await db.agencymembership.find_first(
+                where={"userId": current_user.id, "role": lookup_role},
+                order={"createdAt": "desc"},
+            )
+            if not membership:
+                raise HTTPException(
+                    status_code=403,
+                    detail="No agency membership found for this user"
+                )
+            member_role = str(membership.role)
+            if member_role not in allowed_roles:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access denied: this endpoint requires one of {list(allowed_roles)} in the selected agency"
+                )
+            return AgencyContext(
+                user=current_user,
+                agency_id=str(membership.agencyId),
+                agency_role=member_role,
+            )
+
+        # All other cases still require the header explicitly.
         if not x_agency_id:
             raise HTTPException(
                 status_code=400,

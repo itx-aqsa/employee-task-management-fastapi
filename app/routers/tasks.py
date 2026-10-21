@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from prisma.enums import Role, Status
 from app.database import db
 from app.schemas.task import TaskCreate, TaskUpdate, TaskStatus, TaskStatusUpdate
 from app.middleware.auth import get_current_user
@@ -11,6 +12,7 @@ router = APIRouter(
 )
 
 
+@router.post("", include_in_schema=False)
 @router.post("/")
 async def create_task(
     task: TaskCreate,
@@ -32,7 +34,7 @@ async def create_task(
     if not membership:
         raise HTTPException(status_code=404, detail="Employee not found in this agency")
 
-    if str(membership.user.role) != "EMPLOYEE":
+    if membership.user.role != Role.EMPLOYEE:
         raise HTTPException(status_code=400, detail="Task can only be assigned to an employee")
 
     new_task = await db.task.create(
@@ -49,6 +51,7 @@ async def create_task(
     return {"status": True, "message": "Task created successfully", "data": new_task}
 
 
+@router.get("", include_in_schema=False)
 @router.get("/")
 async def get_tasks(
     agency_ctx: AgencyContext = Depends(require_agency_role("ADMIN", "SUPER_ADMIN"))
@@ -155,7 +158,7 @@ async def update_task(
         )
         if not membership:
             raise HTTPException(status_code=404, detail="Employee not found in this agency")
-        if str(membership.user.role) != "EMPLOYEE":
+        if membership.user.role != Role.EMPLOYEE:
             raise HTTPException(status_code=400, detail="Task can only be assigned to an employee")
         update_data["userId"] = user_id
 

@@ -1,10 +1,12 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from prisma.enums import Role
 from app.database import db
 from app.schemas.agency import (
-    AgencyCreate, AgencyUpdate, AgencyAssignAdmin,
+    AgencyCreate, AgencyUpdate, AgencyAdminCreate,
 )
+from app.core.security import hash_password
 from app.middleware.role import require_role
 
 router = APIRouter(
@@ -37,7 +39,8 @@ async def create_agency(
         data={
             "name": agency.name,
             "description": agency.description,
-            "isDefault": agency.isDefault
+            "isDefault": agency.isDefault,
+            "isActive": agency.isActive,
         }
     )
 
@@ -49,9 +52,10 @@ async def create_agency(
             "name": new_agency.name,
             "description": new_agency.description,
             "isDefault": new_agency.isDefault,
+            "isActive": new_agency.isActive,
             "createdAt": new_agency.createdAt,
-            "updatedAt": new_agency.updatedAt
-        }
+            "updatedAt": new_agency.updatedAt,
+        },
     }
 
 
@@ -139,6 +143,9 @@ async def update_agency(
     if "isDefault" in agency_data.model_fields_set and agency_data.isDefault is not None:
         update_data["isDefault"] = agency_data.isDefault
 
+    if "isActive" in agency_data.model_fields_set and agency_data.isActive is not None:
+        update_data["isActive"] = agency_data.isActive
+
     if not update_data:
         raise HTTPException(status_code=400, detail="At least one agency field must be provided")
 
@@ -161,75 +168,73 @@ async def deactivate_agency(
     agency_id: UUID,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
-    raise HTTPException(
-        status_code=501,
-        detail="Agency deactivation is unavailable because the schema has no active-status field",
+    """Soft-delete: sets isActive=False rather than dropping the record."""
+    existing = await db.agency.find_unique(where={"id": str(agency_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Agency not found")
+
+    if not existing.isActive:
+        raise HTTPException(status_code=400, detail="Agency is already inactive")
+
+    updated = await db.agency.update(
+        where={"id": str(agency_id)},
+        data={"isActive": False},
     )
+    return {"status": True, "message": "Agency deactivated successfully", "data": updated}
 
 
 @router.post("/{agency_id}/admins")
 async def assign_admin_to_agency(
     agency_id: UUID,
-    payload: AgencyAssignAdmin,
+    payload: AgencyAdminCreate,
     current_user=Depends(require_role("SUPER_ADMIN"))
 ):
-    agency = await db.agency.find_unique(
-        where={
-            "id": str(agency_id)
-        }
-    )
-
+    # 1. Verify the target agency exists.
+    agency = await db.agency.find_unique(where={"id": str(agency_id)})
     if not agency:
-        raise HTTPException(
-            status_code=404,
-            detail="Agency not found"
-        )
+        raise HTTPException(status_code=404, detail="Agency not found")
 
-    user = await db.user.find_unique(
-        where={
-            "id": str(payload.userId)
+    # 2. Guard against duplicate email.
+    existing_user = await db.user.find_unique(where={"email": payload.email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="A user with this email already exists")
+
+    # 3. Create the new user with platform role ADMIN.
+    new_user = await db.user.create(
+        data={
+            "name": payload.name,
+            "email": payload.email,
+            "password": hash_password(payload.password),
+            "role": Role.ADMIN,
         }
     )
 
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail="User not found"
-        )
-
-    if user.role not in {"EMPLOYEE", "ADMIN"}:
-        raise HTTPException(
-            status_code=400,
-            detail="Only EMPLOYEE or ADMIN accounts can be assigned as an agency admin"
-        )
-
-    existing_membership = await db.agencymembership.find_unique(
-        where={
-            "userId_agencyId": {
-                "userId": str(payload.userId),
-                "agencyId": str(agency_id)
-            }
-        }
-    )
-
-    if existing_membership:
-        raise HTTPException(
-            status_code=400,
-            detail="This admin is already assigned to the agency"
-        )
-
+    # 4. Create the AgencyMembership linking the new user to the agency as ADMIN.
     membership = await db.agencymembership.create(
         data={
-            "userId": str(payload.userId),
+            "userId": new_user.id,
             "agencyId": str(agency_id),
-            "role": "ADMIN"
+            "role": Role.ADMIN,
         }
     )
 
     return {
         "status": True,
-        "message": "Admin assigned to agency successfully",
-        "data": membership
+        "message": "Admin created and assigned to agency successfully",
+        "data": {
+            "user": {
+                "id": new_user.id,
+                "name": new_user.name,
+                "email": new_user.email,
+                "role": str(new_user.role),
+            },
+            "membership": {
+                "id": membership.id,
+                "userId": membership.userId,
+                "agencyId": membership.agencyId,
+                "role": str(membership.role),
+            },
+        },
     }
 
 

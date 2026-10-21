@@ -11,8 +11,10 @@ from fastapi import HTTPException
 
 from app.schemas.auth import UserContext, AgencyContext
 from app.routers.users import (
+    create_employee,
     get_employees,
     dashboard_stats,
+    platform_stats,
     get_employee,
     update_employee,
     delete_employee,
@@ -135,16 +137,19 @@ class TestDashboardStats:
         ctx = _admin_ctx()
 
         with patch("app.routers.users.db") as mock_db:
-            mock_db.agencymembership.count = AsyncMock(return_value=4)
-            mock_db.task.count = AsyncMock(side_effect=[10, 3])
+            mock_db.agencymembership.count = AsyncMock(side_effect=[1, 4])
+            mock_db.task.count = AsyncMock(side_effect=[10, 3, 5, 2])
 
             result = await dashboard_stats(agency_ctx=ctx)
 
+        assert result["data"]["totalAdmins"] == 1
         assert result["data"]["totalEmployees"] == 4
         assert result["data"]["totalTasks"] == 10
         assert result["data"]["pendingTasks"] == 3
+        assert result["data"]["inProgressTasks"] == 5
+        assert result["data"]["completedTasks"] == 2
 
-        # Both task.count calls must include the agency filter
+        # All task.count calls must include the agency filter
         calls = mock_db.task.count.call_args_list
         for c in calls:
             assert c.kwargs["where"]["agencyId"] == AGENCY_ID
@@ -157,9 +162,42 @@ class TestDashboardStats:
             mock_db.task.count = AsyncMock(return_value=0)
             await dashboard_stats(agency_ctx=ctx)
 
-        membership_call = mock_db.agencymembership.count.call_args.kwargs
-        assert membership_call["where"]["agencyId"] == AGENCY_ID
-        assert membership_call["where"]["role"] == "EMPLOYEE"
+        calls = mock_db.agencymembership.count.call_args_list
+        # First call: ADMIN count, second call: EMPLOYEE count
+        assert any(
+            c.kwargs["where"]["agencyId"] == AGENCY_ID and c.kwargs["where"]["role"] == "EMPLOYEE"
+            for c in calls
+        )
+
+    async def test_membership_count_includes_admin_role(self):
+        """dashboard_stats must also count ADMIN memberships in the agency."""
+        ctx = _admin_ctx()
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.agencymembership.count = AsyncMock(return_value=1)
+            mock_db.task.count = AsyncMock(return_value=0)
+            await dashboard_stats(agency_ctx=ctx)
+
+        calls = mock_db.agencymembership.count.call_args_list
+        assert any(
+            c.kwargs["where"]["agencyId"] == AGENCY_ID and c.kwargs["where"]["role"] == "ADMIN"
+            for c in calls
+        )
+
+    async def test_in_progress_and_completed_task_counts_included(self):
+        """dashboard_stats must return inProgressTasks and completedTasks."""
+        ctx = _admin_ctx()
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.agencymembership.count = AsyncMock(return_value=0)
+            mock_db.task.count = AsyncMock(side_effect=[7, 2, 3, 2])
+
+            result = await dashboard_stats(agency_ctx=ctx)
+
+        assert "inProgressTasks" in result["data"]
+        assert "completedTasks" in result["data"]
+        assert result["data"]["inProgressTasks"] == 3
+        assert result["data"]["completedTasks"] == 2
 
 
 # ===========================================================================
@@ -339,3 +377,354 @@ class TestDeleteEmployee:
         delete_call = mock_db.agencymembership.delete.call_args.kwargs
         assert delete_call["where"]["userId_agencyId"]["userId"] == EMPLOYEE_ID
         assert delete_call["where"]["userId_agencyId"]["agencyId"] == AGENCY_ID
+
+
+# ===========================================================================
+# GET /users/platform-stats
+# ===========================================================================
+
+class TestPlatformStats:
+    async def test_returns_platform_wide_counts(self):
+        """SUPER_ADMIN receives aggregated counts across all agencies."""
+        from app.schemas.auth import UserContext
+        super_admin = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
+
+        with patch("app.routers.users.db") as mock_db:
+            # user.count is called 3 times: total, admins, employees
+            mock_db.user.count = AsyncMock(side_effect=[10, 2, 8])
+            mock_db.agency.count = AsyncMock(return_value=3)
+            mock_db.task.count = AsyncMock(side_effect=[25, 8, 10, 7])
+
+            result = await platform_stats(current_user=super_admin)
+
+        assert result["status"] is True
+        assert result["data"]["totalUsers"] == 10
+        assert result["data"]["totalAgencies"] == 3
+        assert result["data"]["totalAdmins"] == 2
+        assert result["data"]["totalEmployees"] == 8
+        assert result["data"]["totalTasks"] == 25
+        assert result["data"]["pendingTasks"] == 8
+        assert result["data"]["inProgressTasks"] == 10
+        assert result["data"]["completedTasks"] == 7
+
+    async def test_pending_tasks_count_uses_status_filter(self):
+        """The pending task.count call must filter by PENDING status."""
+        from app.schemas.auth import UserContext
+        super_admin = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.count = AsyncMock(side_effect=[5, 1, 4])
+            mock_db.agency.count = AsyncMock(return_value=1)
+            mock_db.task.count = AsyncMock(side_effect=[12, 4, 5, 3])
+
+            await platform_stats(current_user=super_admin)
+
+        # Find the task.count call with status=PENDING
+        from prisma.enums import Status
+        task_calls = mock_db.task.count.call_args_list
+        statuses = [c.kwargs.get("where", {}).get("status") for c in task_calls]
+        assert Status.PENDING in statuses
+
+    async def test_in_progress_and_completed_counts_present(self):
+        """platform_stats must return inProgressTasks and completedTasks."""
+        from app.schemas.auth import UserContext
+        super_admin = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.count = AsyncMock(side_effect=[5, 1, 4])
+            mock_db.agency.count = AsyncMock(return_value=1)
+            mock_db.task.count = AsyncMock(side_effect=[12, 4, 5, 3])
+
+            result = await platform_stats(current_user=super_admin)
+
+        assert "inProgressTasks" in result["data"]
+        assert "completedTasks" in result["data"]
+
+    async def test_admin_and_employee_counts_use_user_table(self):
+        """totalAdmins and totalEmployees must be counted from User rows, not memberships.
+
+        This ensures each person is counted once even if they belong to multiple
+        agencies, and the count never returns 0 due to a membership lookup miss.
+        """
+        from app.schemas.auth import UserContext
+        from prisma.enums import Role
+        super_admin = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.count = AsyncMock(side_effect=[10, 3, 7])
+            mock_db.agency.count = AsyncMock(return_value=2)
+            mock_db.task.count = AsyncMock(side_effect=[20, 5, 8, 7])
+
+            result = await platform_stats(current_user=super_admin)
+
+        assert "totalAdmins" in result["data"]
+        assert "totalEmployees" in result["data"]
+
+        # user.count must be called with role=Role.ADMIN and role=Role.EMPLOYEE
+        user_calls = mock_db.user.count.call_args_list
+        role_filters = [c.kwargs.get("where", {}).get("role") for c in user_calls]
+        assert Role.ADMIN in role_filters
+        assert Role.EMPLOYEE in role_filters
+
+        # agencymembership.count must NOT be called for admin/employee counts
+        mock_db.agencymembership.count.assert_not_called()
+
+    async def test_no_agency_header_needed(self):
+        """platform_stats accepts a plain UserContext — no AgencyContext required."""
+        import inspect
+        sig = inspect.signature(platform_stats)
+        assert "current_user" in sig.parameters
+        assert "agency_ctx" not in sig.parameters
+
+
+# ===========================================================================
+# GET /users/profile
+# ===========================================================================
+
+class TestGetProfile:
+    async def test_employee_profile_includes_agency_id(self):
+        """An EMPLOYEE with a membership gets agencyId in the response."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+
+        user_ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+        mock_user = fake_user(EMPLOYEE_ID, "EMPLOYEE")
+        mock_user.name = "Alice"
+        mock_user.email = "alice@example.com"
+        mock_membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=mock_membership)
+
+            result = await get_profile(current_user=user_ctx)
+
+        assert result["status"] is True
+        assert result["data"]["id"] == EMPLOYEE_ID
+        assert result["data"]["agencyId"] == AGENCY_ID
+
+    async def test_admin_profile_includes_agency_id(self):
+        """An ADMIN with a membership also gets agencyId in the response."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+
+        user_ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        mock_user = fake_user(ADMIN_ID, "ADMIN")
+        mock_user.name = "Bob"
+        mock_user.email = "bob@example.com"
+        mock_membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=mock_membership)
+
+            result = await get_profile(current_user=user_ctx)
+
+        assert result["data"]["agencyId"] == AGENCY_ID
+
+    async def test_super_admin_profile_has_null_agency_id(self):
+        """A SUPER_ADMIN with no membership gets agencyId: None."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+
+        user_ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
+        mock_user = fake_user(SUPER_ADMIN_ID, "SUPER_ADMIN")
+        mock_user.name = "Root"
+        mock_user.email = "root@example.com"
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=None)
+
+            result = await get_profile(current_user=user_ctx)
+
+        assert result["data"]["agencyId"] is None
+
+    async def test_membership_lookup_uses_user_id(self):
+        """The membership query must be scoped to the current user's id."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+
+        user_ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+        mock_user = fake_user(EMPLOYEE_ID, "EMPLOYEE")
+        mock_user.name = "Charlie"
+        mock_user.email = "charlie@example.com"
+        mock_membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=mock_membership)
+
+            await get_profile(current_user=user_ctx)
+
+        call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
+        assert call_kwargs["where"]["userId"] == EMPLOYEE_ID
+
+
+# ===========================================================================
+# POST /users/employees
+# ===========================================================================
+
+class TestCreateEmployee:
+    async def test_creates_user_and_membership_in_agency(self):
+        """Happy path: new EMPLOYEE user is created and enrolled in the agency."""
+        from app.schemas.user import EmployeeCreate
+        from app.routers.users import create_employee
+
+        ctx = _admin_ctx()
+        new_user_id = "eeeeeeee-0000-0000-0000-000000000005"
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=None)  # email free
+
+            created_user = fake_user(new_user_id, "EMPLOYEE")
+            created_user.name = "Eve"
+            created_user.email = "eve@example.com"
+            mock_db.user.create = AsyncMock(return_value=created_user)
+
+            created_membership = fake_membership(new_user_id, AGENCY_ID, "EMPLOYEE")
+            created_membership.id = "mem-99"
+            mock_db.agencymembership.create = AsyncMock(return_value=created_membership)
+
+            result = await create_employee(
+                payload=EmployeeCreate(name="Eve", email="eve@example.com", password="pass123"),
+                agency_ctx=ctx,
+            )
+
+        assert result["status"] is True
+        assert result["data"]["user"]["id"] == new_user_id
+        assert result["data"]["user"]["role"] == "EMPLOYEE"
+        assert result["data"]["membership"]["agencyId"] == AGENCY_ID
+        assert result["data"]["membership"]["role"] == "EMPLOYEE"
+
+    async def test_create_employee_sets_employee_platform_role(self):
+        """The user.create call must pass role='EMPLOYEE' regardless of the caller's role."""
+        from app.schemas.user import EmployeeCreate
+        from app.routers.users import create_employee
+
+        ctx = _admin_ctx()
+        captured = {}
+
+        async def fake_create_user(*, data):
+            captured.update(data)
+            u = fake_user("new-id", data["role"])
+            u.name = data["name"]
+            u.email = data["email"]
+            return u
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=None)
+            mock_db.user.create = AsyncMock(side_effect=fake_create_user)
+            mock_db.agencymembership.create = AsyncMock(
+                return_value=fake_membership("new-id", AGENCY_ID, "EMPLOYEE")
+            )
+
+            await create_employee(
+                payload=EmployeeCreate(name="Frank", email="frank@example.com", password="pw"),
+                agency_ctx=ctx,
+            )
+
+        assert captured["role"] == "EMPLOYEE"
+
+    async def test_create_employee_hashes_password(self):
+        """The stored password must not be the plain-text value sent by the client."""
+        from app.schemas.user import EmployeeCreate
+        from app.routers.users import create_employee
+
+        ctx = _admin_ctx()
+        captured = {}
+
+        async def fake_create_user(*, data):
+            captured.update(data)
+            u = fake_user("new-id", "EMPLOYEE")
+            u.name = data["name"]
+            u.email = data["email"]
+            return u
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=None)
+            mock_db.user.create = AsyncMock(side_effect=fake_create_user)
+            mock_db.agencymembership.create = AsyncMock(
+                return_value=fake_membership("new-id", AGENCY_ID, "EMPLOYEE")
+            )
+
+            await create_employee(
+                payload=EmployeeCreate(name="Grace", email="grace@example.com", password="plaintext"),
+                agency_ctx=ctx,
+            )
+
+        assert captured["password"] != "plaintext"
+
+    async def test_create_employee_membership_uses_agency_from_context(self):
+        """The membership must be linked to the agency from AgencyContext, not user input."""
+        from app.schemas.user import EmployeeCreate
+        from app.routers.users import create_employee
+
+        ctx = _admin_ctx(agency_id=AGENCY_ID)
+        membership_data = {}
+
+        async def fake_create_membership(*, data):
+            membership_data.update(data)
+            return fake_membership(data["userId"], data["agencyId"], data["role"])
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=None)
+            created_user = fake_user("new-id", "EMPLOYEE")
+            created_user.name = "Heidi"
+            created_user.email = "heidi@example.com"
+            mock_db.user.create = AsyncMock(return_value=created_user)
+            mock_db.agencymembership.create = AsyncMock(side_effect=fake_create_membership)
+
+            await create_employee(
+                payload=EmployeeCreate(name="Heidi", email="heidi@example.com", password="pw"),
+                agency_ctx=ctx,
+            )
+
+        assert membership_data["agencyId"] == AGENCY_ID
+        assert membership_data["role"] == "EMPLOYEE"
+
+    async def test_create_employee_duplicate_email_raises_400(self):
+        """400 when the email is already registered."""
+        from app.schemas.user import EmployeeCreate
+        from app.routers.users import create_employee
+
+        ctx = _admin_ctx()
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(
+                return_value=fake_user(EMPLOYEE_ID, "EMPLOYEE")  # email taken
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await create_employee(
+                    payload=EmployeeCreate(name="Ivan", email="taken@example.com", password="pw"),
+                    agency_ctx=ctx,
+                )
+
+        assert exc_info.value.status_code == 400
+        # No user or membership should have been created
+        mock_db.user.create.assert_not_called()
+
+    async def test_super_admin_can_create_employee(self):
+        """SUPER_ADMIN context must also be accepted by the endpoint."""
+        from app.schemas.user import EmployeeCreate
+        from app.routers.users import create_employee
+
+        ctx = _super_admin_ctx(agency_id=AGENCY_ID)
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=None)
+            created_user = fake_user("new-id", "EMPLOYEE")
+            created_user.name = "Judy"
+            created_user.email = "judy@example.com"
+            mock_db.user.create = AsyncMock(return_value=created_user)
+            mock_db.agencymembership.create = AsyncMock(
+                return_value=fake_membership("new-id", AGENCY_ID, "EMPLOYEE")
+            )
+
+            result = await create_employee(
+                payload=EmployeeCreate(name="Judy", email="judy@example.com", password="pw"),
+                agency_ctx=ctx,
+            )
+
+        assert result["status"] is True
+        assert result["data"]["membership"]["agencyId"] == AGENCY_ID

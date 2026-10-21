@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
+from prisma.enums import Role, Status
 from app.database import db
-from app.schemas.user import UserCreate, UserLogin, UserUpdate
+from app.schemas.user import UserCreate, UserLogin, UserUpdate, EmployeeCreate
 from app.core.security import hash_password, verify_password, create_access_token
 from app.middleware.auth import get_current_user
 from app.middleware.role import require_agency_role, require_role, require_platform_role
@@ -81,10 +82,17 @@ async def logout_user(response: Response):
 
 @router.get("/profile")
 async def get_profile(current_user=Depends(get_current_user)):
-    """Return the authenticated user's own profile."""
+    """Return the authenticated user's own profile, including agencyId if they have a membership."""
     user = await db.user.find_unique(where={"id": current_user.id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # Fetch the most recent agency membership for this user (covers ADMIN and EMPLOYEE).
+    membership = await db.agencymembership.find_first(
+        where={"userId": current_user.id},
+        order={"createdAt": "desc"},
+    )
+
     return {
         "status": True,
         "data": {
@@ -92,6 +100,7 @@ async def get_profile(current_user=Depends(get_current_user)):
             "name": user.name,
             "email": user.email,
             "role": user.role,
+            "agencyId": membership.agencyId if membership else None,
         },
     }
 
@@ -107,9 +116,96 @@ async def get_all_users(current_user=Depends(require_platform_role("SUPER_ADMIN"
     return {"status": True, "data": users}
 
 
+@router.get("/platform-stats")
+async def platform_stats(
+    current_user=Depends(require_platform_role("SUPER_ADMIN"))
+):
+    """Platform-wide aggregate stats across all agencies. SUPER_ADMIN only, no agency scope."""
+    total_users = await db.user.count()
+    total_agencies = await db.agency.count()
+    # Count distinct admin/employee users directly from the User table so each
+    # person is counted once regardless of how many agencies they belong to.
+    total_admins = await db.user.count(where={"role": Role.ADMIN})
+    total_employees = await db.user.count(where={"role": Role.EMPLOYEE})
+    total_tasks = await db.task.count()
+    pending_tasks = await db.task.count(where={"status": Status.PENDING})
+    in_progress_tasks = await db.task.count(where={"status": Status.IN_PROGRESS})
+    completed_tasks = await db.task.count(where={"status": Status.COMPLETED})
+    return {
+        "status": True,
+        "data": {
+            "totalUsers": total_users,
+            "totalAgencies": total_agencies,
+            "totalAdmins": total_admins,
+            "totalEmployees": total_employees,
+            "totalTasks": total_tasks,
+            "pendingTasks": pending_tasks,
+            "inProgressTasks": in_progress_tasks,
+            "completedTasks": completed_tasks,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Agency-scoped endpoints — require X-Agency-ID header
 # ---------------------------------------------------------------------------
+
+@router.post("/employees")
+async def create_employee(
+    payload: EmployeeCreate,
+    agency_ctx: AgencyContext = Depends(require_agency_role("ADMIN", "SUPER_ADMIN"))
+):
+    """
+    Create a new EMPLOYEE user and immediately enroll them in the agency.
+
+    Steps performed atomically (sequential DB writes):
+    1. Guard against duplicate email.
+    2. Create the User record with platform role EMPLOYEE.
+    3. Create the AgencyMembership linking that user to the agency as EMPLOYEE.
+
+    This ensures the new employee is visible in dashboard stats and employee
+    listings as soon as the request completes — no manual DB intervention needed.
+    """
+    existing = await db.user.find_unique(where={"email": payload.email})
+    if existing:
+        raise HTTPException(status_code=400, detail="A user with this email already exists")
+
+    new_user = await db.user.create(
+        data={
+            "name": payload.name,
+            "email": payload.email,
+            "password": hash_password(payload.password),
+            "role": Role.EMPLOYEE,
+        }
+    )
+
+    membership = await db.agencymembership.create(
+        data={
+            "userId": new_user.id,
+            "agencyId": agency_ctx.agency_id,
+            "role": Role.EMPLOYEE,
+        }
+    )
+
+    return {
+        "status": True,
+        "message": "Employee created and enrolled in agency successfully",
+        "data": {
+            "user": {
+                "id": new_user.id,
+                "name": new_user.name,
+                "email": new_user.email,
+                "role": str(new_user.role),
+            },
+            "membership": {
+                "id": membership.id,
+                "userId": membership.userId,
+                "agencyId": membership.agencyId,
+                "role": str(membership.role),
+            },
+        },
+    }
+
 
 @router.get("/employees")
 async def get_employees(
@@ -117,7 +213,7 @@ async def get_employees(
 ):
     """List EMPLOYEE-role members of the agency with their scoped task counts."""
     memberships = await db.agencymembership.find_many(
-        where={"agencyId": agency_ctx.agency_id, "role": "EMPLOYEE"},
+        where={"agencyId": agency_ctx.agency_id, "role": Role.EMPLOYEE},
         include={"user": True},
         order=[{"createdAt": "desc"}],
     )
@@ -147,7 +243,7 @@ async def get_admins(
 ):
     """List ADMIN-role members of the agency."""
     memberships = await db.agencymembership.find_many(
-        where={"agencyId": agency_ctx.agency_id, "role": "ADMIN"},
+        where={"agencyId": agency_ctx.agency_id, "role": Role.ADMIN},
         include={"user": True},
         order=[{"createdAt": "desc"}],
     )
@@ -171,20 +267,32 @@ async def get_admins(
 async def dashboard_stats(
     agency_ctx: AgencyContext = Depends(require_agency_role("ADMIN", "SUPER_ADMIN"))
 ):
-    """Agency-scoped employee and task counts."""
+    """Agency-scoped employee, admin, and task counts."""
+    total_admins = await db.agencymembership.count(
+        where={"agencyId": agency_ctx.agency_id, "role": Role.ADMIN}
+    )
     total_employees = await db.agencymembership.count(
-        where={"agencyId": agency_ctx.agency_id, "role": "EMPLOYEE"}
+        where={"agencyId": agency_ctx.agency_id, "role": Role.EMPLOYEE}
     )
     total_tasks = await db.task.count(where={"agencyId": agency_ctx.agency_id})
     pending_tasks = await db.task.count(
-        where={"agencyId": agency_ctx.agency_id, "status": "PENDING"}
+        where={"agencyId": agency_ctx.agency_id, "status": Status.PENDING}
+    )
+    in_progress_tasks = await db.task.count(
+        where={"agencyId": agency_ctx.agency_id, "status": Status.IN_PROGRESS}
+    )
+    completed_tasks = await db.task.count(
+        where={"agencyId": agency_ctx.agency_id, "status": Status.COMPLETED}
     )
     return {
         "status": True,
         "data": {
+            "totalAdmins": total_admins,
             "totalEmployees": total_employees,
             "totalTasks": total_tasks,
             "pendingTasks": pending_tasks,
+            "inProgressTasks": in_progress_tasks,
+            "completedTasks": completed_tasks,
         },
     }
 
@@ -203,7 +311,7 @@ async def get_employee(
         raise HTTPException(status_code=404, detail="Employee not found")
 
     user = membership.user
-    if user.role not in ("EMPLOYEE",):
+    if user.role not in (Role.EMPLOYEE,):
         raise HTTPException(status_code=404, detail="Employee not found")
 
     return {
@@ -229,7 +337,7 @@ async def update_employee(
     if not existing_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if existing_user.role not in ("EMPLOYEE",):
+    if existing_user.role not in (Role.EMPLOYEE,):
         raise HTTPException(status_code=403, detail="Admin user cannot be edited here")
 
     update_data: dict = {}
@@ -273,7 +381,7 @@ async def delete_employee(
     if not membership:
         raise HTTPException(status_code=404, detail="Employee not found")
 
-    if membership.user.role not in ("EMPLOYEE",):
+    if membership.user.role not in (Role.EMPLOYEE,):
         raise HTTPException(status_code=403, detail="Admin user cannot be removed here")
 
     await db.agencymembership.delete(
