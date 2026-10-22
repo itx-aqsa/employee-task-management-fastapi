@@ -87,11 +87,15 @@ async def get_profile(current_user=Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Fetch the most recent agency membership for this user (covers ADMIN and EMPLOYEE).
-    membership = await db.agencymembership.find_first(
-        where={"userId": current_user.id},
-        order={"createdAt": "desc"},
-    )
+    # Filter by role so a stale membership in another agency is never returned.
+    # SUPER_ADMIN has no membership row; skip the lookup entirely for them.
+    membership = None
+    if current_user.platform_role in ("ADMIN", "EMPLOYEE"):
+        lookup_role = Role.ADMIN if current_user.platform_role == "ADMIN" else Role.EMPLOYEE
+        membership = await db.agencymembership.find_first(
+            where={"userId": current_user.id, "role": lookup_role},
+            order={"createdAt": "desc"},
+        )
 
     return {
         "status": True,
@@ -100,7 +104,7 @@ async def get_profile(current_user=Depends(get_current_user)):
             "name": user.name,
             "email": user.email,
             "role": user.role,
-            "agencyId": membership.agencyId if membership else None,
+            "agencyId": str(membership.agencyId) if membership else None,
         },
     }
 
@@ -123,8 +127,6 @@ async def platform_stats(
     """Platform-wide aggregate stats across all agencies. SUPER_ADMIN only, no agency scope."""
     total_users = await db.user.count()
     total_agencies = await db.agency.count()
-    # Count distinct admin/employee users directly from the User table so each
-    # person is counted once regardless of how many agencies they belong to.
     total_admins = await db.user.count(where={"role": Role.ADMIN})
     total_employees = await db.user.count(where={"role": Role.EMPLOYEE})
     total_tasks = await db.task.count()
@@ -155,17 +157,7 @@ async def create_employee(
     payload: EmployeeCreate,
     agency_ctx: AgencyContext = Depends(require_agency_role("ADMIN", "SUPER_ADMIN"))
 ):
-    """
-    Create a new EMPLOYEE user and immediately enroll them in the agency.
-
-    Steps performed atomically (sequential DB writes):
-    1. Guard against duplicate email.
-    2. Create the User record with platform role EMPLOYEE.
-    3. Create the AgencyMembership linking that user to the agency as EMPLOYEE.
-
-    This ensures the new employee is visible in dashboard stats and employee
-    listings as soon as the request completes — no manual DB intervention needed.
-    """
+    """Create a new EMPLOYEE user and enroll them in the agency."""
     existing = await db.user.find_unique(where={"email": payload.email})
     if existing:
         raise HTTPException(status_code=400, detail="A user with this email already exists")

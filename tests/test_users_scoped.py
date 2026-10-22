@@ -534,7 +534,6 @@ class TestGetProfile:
 
         with patch("app.routers.users.db") as mock_db:
             mock_db.user.find_unique = AsyncMock(return_value=mock_user)
-            mock_db.agencymembership.find_first = AsyncMock(return_value=None)
 
             result = await get_profile(current_user=user_ctx)
 
@@ -559,6 +558,93 @@ class TestGetProfile:
 
         call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
         assert call_kwargs["where"]["userId"] == EMPLOYEE_ID
+
+    async def test_employee_profile_membership_lookup_filters_by_employee_role(self):
+        """Membership query for EMPLOYEE must filter by role=EMPLOYEE."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+        from prisma.enums import Role
+
+        user_ctx = UserContext(id=EMPLOYEE_ID, platform_role="EMPLOYEE")
+        mock_user = fake_user(EMPLOYEE_ID, "EMPLOYEE")
+        mock_user.name = "Dana"
+        mock_user.email = "dana@example.com"
+        mock_membership = fake_membership(EMPLOYEE_ID, AGENCY_ID, "EMPLOYEE")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=mock_membership)
+
+            await get_profile(current_user=user_ctx)
+
+        call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
+        assert call_kwargs["where"]["userId"] == EMPLOYEE_ID
+        assert call_kwargs["where"]["role"] == Role.EMPLOYEE
+
+    async def test_admin_profile_membership_lookup_filters_by_admin_role(self):
+        """Membership query for ADMIN must filter by role=ADMIN."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+        from prisma.enums import Role
+
+        user_ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        mock_user = fake_user(ADMIN_ID, "ADMIN")
+        mock_user.name = "Eve"
+        mock_user.email = "eve@example.com"
+        mock_membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=mock_membership)
+
+            await get_profile(current_user=user_ctx)
+
+        call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
+        assert call_kwargs["where"]["userId"] == ADMIN_ID
+        assert call_kwargs["where"]["role"] == Role.ADMIN
+
+    async def test_admin_with_stale_employee_membership_returns_admin_agency_id(self):
+        """ADMIN with a stale EMPLOYEE membership in another agency still gets their ADMIN agencyId."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+        from prisma.enums import Role
+
+        user_ctx = UserContext(id=ADMIN_ID, platform_role="ADMIN")
+        mock_user = fake_user(ADMIN_ID, "ADMIN")
+        mock_user.name = "Frank"
+        mock_user.email = "frank@example.com"
+
+        admin_membership = fake_membership(ADMIN_ID, AGENCY_ID, "ADMIN")
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=admin_membership)
+
+            result = await get_profile(current_user=user_ctx)
+
+        assert result["data"]["agencyId"] == AGENCY_ID
+
+        call_kwargs = mock_db.agencymembership.find_first.call_args.kwargs
+        assert call_kwargs["where"]["role"] == Role.ADMIN
+
+    async def test_super_admin_profile_skips_membership_lookup(self):
+        """SUPER_ADMIN profile must return agencyId=None without querying AgencyMembership."""
+        from app.schemas.auth import UserContext
+        from app.routers.users import get_profile
+
+        user_ctx = UserContext(id=SUPER_ADMIN_ID, platform_role="SUPER_ADMIN")
+        mock_user = fake_user(SUPER_ADMIN_ID, "SUPER_ADMIN")
+        mock_user.name = "Root"
+        mock_user.email = "root@example.com"
+
+        with patch("app.routers.users.db") as mock_db:
+            mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+            mock_db.agencymembership.find_first = AsyncMock(return_value=None)
+
+            result = await get_profile(current_user=user_ctx)
+
+        mock_db.agencymembership.find_first.assert_not_called()
+        assert result["data"]["agencyId"] is None
 
 
 # ===========================================================================
