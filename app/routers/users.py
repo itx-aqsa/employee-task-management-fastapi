@@ -87,11 +87,19 @@ async def get_profile(current_user=Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Fetch the most recent agency membership for this user (covers ADMIN and EMPLOYEE).
-    membership = await db.agencymembership.find_first(
-        where={"userId": current_user.id},
-        order={"createdAt": "desc"},
-    )
+    # Fetch the most recent agency membership that matches the user's platform role.
+    # Filtering by role prevents an ADMIN who also holds a stale EMPLOYEE membership
+    # in a different agency from receiving that agency's ID — which would cause the
+    # frontend to send the wrong X-Agency-ID header and see 0 employees / 0 tasks.
+    #
+    # SUPER_ADMIN users have no membership row; the lookup is skipped for them.
+    membership = None
+    if current_user.platform_role in ("ADMIN", "EMPLOYEE"):
+        lookup_role = Role.ADMIN if current_user.platform_role == "ADMIN" else Role.EMPLOYEE
+        membership = await db.agencymembership.find_first(
+            where={"userId": current_user.id, "role": lookup_role},
+            order={"createdAt": "desc"},
+        )
 
     return {
         "status": True,
@@ -100,7 +108,7 @@ async def get_profile(current_user=Depends(get_current_user)):
             "name": user.name,
             "email": user.email,
             "role": user.role,
-            "agencyId": membership.agencyId if membership else None,
+            "agencyId": str(membership.agencyId) if membership else None,
         },
     }
 
